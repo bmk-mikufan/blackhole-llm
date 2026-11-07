@@ -11,7 +11,7 @@
 A student research project by **KEYEAST**, the computer science club at Changwon Science High School (Korea).
 Team: Mugyeong Bae (lead), Junyoung Oh, Rinha Kim, Yujun Lee.
 
-> **Status: Phase 0 (pre-hardware) complete.** Everything below comes from analytical models and
+> **Status: Phase 0 (pre-hardware analysis + CPU accuracy emulation) complete.** Everything below comes from analytical models and
 > CPU emulation, calibrated against Tenstorrent's published numbers. **No result in this repo was
 > measured on a Blackhole card yet.** Hardware measurements will be added under `bench/` and marked as such.
 
@@ -75,6 +75,37 @@ outliers cost ~3 dB. BFP4 sits around 16 to 19 dB SQNR (≈11 to 15% RMS weight 
 layer and per tensor group instead of globally. Truncation instead of round-to-nearest costs a further 4.6 to 5.8 dB
 ([`results/bfp_synthetic.md`](results/bfp_synthetic.md)).
 
+**5. On a real model, the stock `tt-perf` mix is not on the accuracy/bytes Pareto front.**
+We fake-quantized every linear weight of **Qwen3-0.6B** to TT block formats ([`ppl.py`](ppl.py), weights only) and measured
+wikitext-2 perplexity on GitHub Actions (32k tokens, ctx 512; fp32 reference PPL 27.69).
+
+| Config | Weight bytes saved vs all-BFP8 | Δ PPL vs fp32 |
+|---|---:|---:|
+| all-BFP8 | 0 MB | +0.5% |
+| `tt-perf` (stock: BFP4 FF1/FF3) | 88.1 MB | +10.7% |
+| `tt-perf`, but layers 0/22/27 kept BFP8 | 78.6 MB | +8.0% |
+| MLP all BFP4 (`mlp-bfp4`) | 132.1 MB | +16.1% |
+| **`mlp-bfp4`, but layers 0/22/27 kept BFP8** | **118.0 MB** | **+10.3%** |
+| **BFP4 for WO + FF2 + WQKV, FF1/FF3 kept BFP8** | **132.1 MB** | **+11.7%** |
+| all BFP4 | 298.0 MB | +30.9% |
+
+- **Tensor-group sensitivity:** with everything else at BFP8, moving one group to BFP4 costs (Δ PPL per 10 MB saved)
+  FF1/FF3 1.16% > FF2 1.02% > LM head 0.77% ≈ WQKV 0.75% > WO 0.46%. FF1/FF3 is both the largest group and the most
+  expensive per byte, yet it is the one the stock mix compresses.
+- **Layer sensitivity:** dropping a single layer's MLP to BFP4 costs <1% for 26 of 28 layers. The outliers are
+  **layer 27 (last, +2.7%)** and **layer 22 (+1.6%)**, with layer 0 next (+0.9%) (8k-token sweep, noise ≈ ±0.3%).
+- **Consequences:** keeping just 3 of 28 layers at BFP8 saves *more* bytes than `tt-perf` (118 vs 88 MB) at *lower* loss
+  (+10.3% vs +10.7%). At equal bytes to `mlp-bfp4`, compressing attention + FF2 instead of FF1/FF3 cuts the loss from
+  +16.1% to +11.7%. Since decode is bandwidth-bound, bytes saved convert directly into decode speed (finding 1),
+  so a per-layer, per-group format search is worth doing on hardware.
+
+![pareto](figures/ppl_pareto_Qwen3-0.6B.png)
+![sensitivity](figures/ppl_sensitivity_Qwen3-0.6B.png)
+
+Caveats: one small model, one corpus. Small models are known to be more sensitive to quantization than 8B-class ones.
+KV-cache and activation formats and math fidelity are not emulated. Next: Qwen3-1.7B/4B and Llama 3.2 on the same pipeline.
+Raw tables: [`results/ppl_Qwen3-0.6B_*.md`](results/).
+
 ## Repository
 
 | Path | What |
@@ -82,6 +113,9 @@ layer and per tensor group instead of globally. Truncation instead of round-to-n
 | [`roofline.py`](roofline.py) | Model zoo (16 configs), memory footprint, KV budget, bandwidth-bound decode ceiling, L1 residency, calibration vs published numbers |
 | [`bfp.py`](bfp.py) | CPU emulator for TT `bfp8_b` / `bfp4_b` (shared-exponent block float) + synthetic error study |
 | [`ppl.py`](ppl.py) | Perplexity of any HF causal LM with weights fake-quantized per tensor group (`wqkv`, `wo`, `ff1_3`, `ff2`, `lm_head`) |
+| [`plot_ppl.py`](plot_ppl.py) | Sensitivity and Pareto figures from the `ppl.py` result tables |
+| [`.github/workflows/ppl.yml`](.github/workflows/ppl.yml) | Runs `ppl.py` experiments in parallel on GitHub-hosted runners and commits the results |
+| [`tests/test_ppl.py`](tests/test_ppl.py) | Smoke test of the fake-quant pipeline on a tiny random Llama (no download) |
 | [`bench/reproduce_baseline.sh`](bench/reproduce_baseline.sh) | Phase 1 hardware script: reproduce the published Llama 3.1 8B p150 number |
 | `results/`, `figures/` | Generated outputs (regenerate with the commands below) |
 
@@ -89,15 +123,18 @@ layer and per tensor group instead of globally. Truncation instead of round-to-n
 pip install -r requirements.txt
 python roofline.py                     # fit / ceiling / L1 tables + figures
 python bfp.py                          # BFP emulator self-check + synthetic study
-python ppl.py --model Qwen/Qwen3-0.6B --text wikitext2_test.txt   # accuracy per format mix
+python ppl.py --model Qwen/Qwen3-0.6B --text data/wikitext2_test.txt   # accuracy per format mix (heavy: prefer the workflow)
+python plot_ppl.py Qwen3-0.6B          # figures from results/ppl_*.md
+gh workflow run ppl.yml -f model=Qwen/Qwen3-1.7B   # run the default experiment set in the cloud
 ```
 
-Both scripts run built-in `assert` self-checks before producing output.
+`roofline.py` and `bfp.py` run built-in `assert` self-checks before producing output; the workflow runs `tests/test_ppl.py` first.
 
 ## Roadmap
 
 - [x] **Phase 0 · Pre-hardware analysis**: footprint/KV model, bandwidth ceiling calibrated to published p150 data, L1 residency analysis, BFP emulator
-- [ ] **Phase 0b · Accuracy emulation**: PPL of BF16 / BFP8 / `tt-perf` / BFP4 mixes on Qwen3, Llama 3.2, Gemma 3 (CPU)
+- [x] **Phase 0b · Accuracy emulation (Qwen3-0.6B)**: format mixes, tensor-group and per-layer BFP4 sensitivity, protected-layer mixes
+- [ ] **Phase 0c**: same pipeline on Qwen3-1.7B/4B, Llama 3.2 1B/3B, Gemma 3 1B; test whether per-layer sensitivities add up
 - [ ] **Phase 1 · Bring-up**: TT-Metalium/TT-NN + vLLM plugin; reproduce 33.1 t/s/u; validate the fit table on real allocator limits
 - [ ] **Phase 2 · Optimization**
   - [ ] Per-layer format search (BFP4 MLP / BFP8 attention / sensitive-layer exceptions), using `ppl.py` for ranking
@@ -122,6 +159,7 @@ Both scripts run built-in `assert` self-checks before producing output.
 (2) 32B급 모델은 MLP를 BFP4로 줄여야만 32GB에 들어갑니다.
 (3) 8B 이상 모델은 레이어 하나도 L1(180MB)에 다 들어가지 않으므로, L1은 가중치 상주보다 프리페치 용도로 써야 합니다.
 (4) BFP 블록 포맷의 오차는 이상치 채널의 방향에 따라 달라집니다.
+(5) Qwen3-0.6B 실험에서 Tenstorrent 기본 설정(tt-perf)은 정확도 대비 절약 바이트 측면에서 최적이 아니었습니다. 민감한 레이어 3개(0, 22, 27)만 BFP8로 두면 기본 설정보다 바이트는 더 줄이면서(118MB 대 88MB) 정확도 손실은 더 작았습니다(+10.3% 대 +10.7%).
 
 ## License
 
