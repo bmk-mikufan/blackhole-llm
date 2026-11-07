@@ -1,0 +1,64 @@
+# CPU accuracy emulation (Phase 0b) on GitHub-hosted runners; results are committed to results/.
+name: ppl
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: HF model id
+        default: Qwen/Qwen3-0.6B
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: formats
+            args: --max-tokens 32768
+          - tag: groups   # all-bfp8 with exactly one tensor group dropped to bfp4
+            args: --max-tokens 32768 --configs all-bfp8,all-bfp8+wqkv=bfp4,all-bfp8+wo=bfp4,all-bfp8+ff1_3=bfp4,all-bfp8+ff2=bfp4,all-bfp8+lm_head=bfp4
+          - tag: layers   # all-bfp8 with one layer's MLP dropped to bfp4
+            args: --max-tokens 8192 --layer-sweep ff1_3,ff2=bfp4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q numpy matplotlib "transformers>=4.51" pyarrow huggingface_hub
+      - name: wikitext-2 test split
+        run: |
+          mkdir -p data
+          python -c "
+          from huggingface_hub import hf_hub_download; import pyarrow.parquet as pq
+          p = hf_hub_download('Salesforce/wikitext', 'wikitext-2-raw-v1/test-00000-of-00001.parquet', repo_type='dataset')
+          open('data/wikitext2_test.txt', 'w').write(''.join(pq.read_table(p).column('text').to_pylist()))"
+      - run: python tests/test_ppl.py
+      - run: python ppl.py --model "${{ inputs.model }}" --text data/wikitext2_test.txt --tag ${{ matrix.tag }} ${{ matrix.args }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppl-${{ matrix.tag }}
+          path: results/ppl_*.md
+
+  commit:
+    needs: run
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+          merge-multiple: true
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add results/
+          git diff --cached --quiet || git commit -m "results: ppl for ${{ inputs.model }} (run ${{ github.run_id }})"
+          git push
