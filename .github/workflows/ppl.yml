@@ -6,6 +6,14 @@ on:
       model:
         description: HF model id
         default: Qwen/Qwen3-0.6B
+      matrix:
+        description: 'JSON list of experiments [{"tag": ..., "args": ...}], one parallel job each'
+        # formats: every roofline config | groups: all-bfp8 with one tensor group at bfp4 |
+        # layers: all-bfp8 with one layer's MLP at bfp4
+        default: >-
+          [{"tag": "formats", "args": "--max-tokens 32768"},
+           {"tag": "groups", "args": "--max-tokens 32768 --configs all-bfp8,all-bfp8+wqkv=bfp4,all-bfp8+wo=bfp4,all-bfp8+ff1_3=bfp4,all-bfp8+ff2=bfp4,all-bfp8+lm_head=bfp4"},
+           {"tag": "layers", "args": "--max-tokens 8192 --layer-sweep ff1_3,ff2=bfp4"}]
 
 permissions:
   contents: write
@@ -17,13 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - tag: formats
-            args: --max-tokens 32768
-          - tag: groups   # all-bfp8 with exactly one tensor group dropped to bfp4
-            args: --max-tokens 32768 --configs all-bfp8,all-bfp8+wqkv=bfp4,all-bfp8+wo=bfp4,all-bfp8+ff1_3=bfp4,all-bfp8+ff2=bfp4,all-bfp8+lm_head=bfp4
-          - tag: layers   # all-bfp8 with one layer's MLP dropped to bfp4
-            args: --max-tokens 8192 --layer-sweep ff1_3,ff2=bfp4
+        include: ${{ fromJSON(inputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
