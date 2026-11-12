@@ -106,6 +106,27 @@ Caveats: one small model, one corpus. Small models are known to be more sensitiv
 KV-cache and activation formats and math fidelity are not emulated. Next: Qwen3-1.7B/4B and Llama 3.2 on the same pipeline.
 Raw tables: [`results/ppl_Qwen3-0.6B_*.md`](results/).
 
+**6. Replication on Qwen3-1.7B: the group ranking holds, the layer ranking does not.**
+Same pipeline, same budget (fp32 reference PPL 20.76).
+
+| Config | Qwen3-0.6B Δ PPL | Qwen3-1.7B Δ PPL |
+|---|---:|---:|
+| all-BFP8 | +0.5% | +0.05% |
+| `tt-perf` (BFP4 FF1/FF3) | +10.7% | +6.9% |
+| `mlp-bfp4` (BFP4 FF1/FF3/FF2) | +16.1% | **+5.0%** |
+| all-BFP4 | +30.9% | +12.7% |
+| one group → BFP4: FF1/FF3 / LM head / WQKV / WO / FF2 | +10.7 / +6.5 / +4.9 / +1.9 / +5.0% | +6.9 / +5.5 / +1.7 / +0.2 / **−1.2%** |
+
+- **Consistent across sizes:** the larger model is ~2× less sensitive overall, and FF1/FF3 and the LM head remain the most
+  damaging groups to put in BFP4 while WO stays nearly free. Format choice should be made per tensor group.
+- **Not consistent:** on 1.7B no single layer's MLP costs more than 1% at BFP4, and the last layer, the most sensitive one
+  on 0.6B, shows the opposite sign. A protected-layer set therefore has to be searched per model and cannot be copied across sizes.
+- **Anomaly to check:** BFP4 FF2 *lowers* wikitext-2 perplexity on 1.7B (also visible as `mlp-bfp4` beating `tt-perf`).
+  Quantization noise can act as a regularizer on one corpus. We will re-test with a second corpus and logit KL divergence
+  before reading anything into it.
+
+![sensitivity 1.7B](figures/ppl_sensitivity_Qwen3-1.7B.png)
+
 ## Repository
 
 | Path | What |
@@ -134,7 +155,8 @@ gh workflow run ppl.yml -f model=Qwen/Qwen3-1.7B   # run the default experiment 
 
 - [x] **Phase 0 · Pre-hardware analysis**: footprint/KV model, bandwidth ceiling calibrated to published p150 data, L1 residency analysis, BFP emulator
 - [x] **Phase 0b · Accuracy emulation (Qwen3-0.6B)**: format mixes, tensor-group and per-layer BFP4 sensitivity, protected-layer mixes
-- [ ] **Phase 0c**: same pipeline on Qwen3-1.7B/4B, Llama 3.2 1B/3B, Gemma 3 1B; test whether per-layer sensitivities add up
+- [x] **Phase 0c · Replication on Qwen3-1.7B**: group ranking holds, layer ranking is model-specific
+- [ ] **Phase 0d**: second corpus + logit KL divergence; Llama 3.2 1B/3B, Gemma 3 1B; test whether per-layer sensitivities add up
 - [ ] **Phase 1 · Bring-up**: TT-Metalium/TT-NN + vLLM plugin; reproduce 33.1 t/s/u; validate the fit table on real allocator limits
 - [ ] **Phase 2 · Optimization**
   - [ ] Per-layer format search (BFP4 MLP / BFP8 attention / sensitive-layer exceptions), using `ppl.py` for ranking
