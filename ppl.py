@@ -19,6 +19,7 @@ import torch
 from bfp import quantize_linear_weight
 from roofline import BYTES, CONFIGS
 
+CHUNK = 256   # input columns quantized per slice
 GROUP = {"q_proj": "wqkv", "k_proj": "wqkv", "v_proj": "wqkv", "o_proj": "wo",
          "gate_proj": "ff1_3", "up_proj": "ff1_3", "down_proj": "ff2", "lm_head": "lm_head"}
 
@@ -46,9 +47,13 @@ def apply_config(model, cfg):
         if g and isinstance(mod, torch.nn.Linear):
             layer = re.search(r"layers\.(\d+)\.", name)
             fmt = cfg.get(f"L{layer.group(1)}.{g}", cfg[g]) if layer else cfg[g]
-            w = mod.weight.data.float().numpy()
-            # BFP8/BFP4 values have <= 7 significant bits, so storing them back in bf16 is lossless
-            mod.weight.data = torch.from_numpy(quantize_linear_weight(w, fmt)).to(mod.weight.dtype)
+            w = mod.weight.data
+            # Blocks run along the output dim, so input-column slices are independent; slicing caps the
+            # fp32 temporaries (a 151936-row LM head quantized at once OOMs a 16 GB runner for a 4B model).
+            # BFP8/BFP4 values have <= 7 significant bits, so storing them back in bf16 is lossless.
+            for j in range(0, w.shape[1], CHUNK):
+                c = w[:, j:j + CHUNK].float().numpy()
+                w[:, j:j + CHUNK] = torch.from_numpy(quantize_linear_weight(c, fmt)).to(w.dtype)
             n += 1
     return n
 

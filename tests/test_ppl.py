@@ -20,6 +20,7 @@ for name in CONFIGS:
 emb_ok = torch.equal(m.model.embed_tokens.weight, ref["model.embed_tokens.weight"])
 print(base, out, "embedding untouched:", emb_ok)
 assert emb_ok and abs(out["bf16"]-base)/base < 0.01
+ppl.CHUNK = 16  # exercise slicing on the tiny model (hidden 64)
 c = ppl.parse_spec("all-bfp8+ff2=bfp4+L1.ff1_3=bf16")
 assert c["ff2"] == "bfp4" and c["L1.ff1_3"] == "bf16" and c["ff1_3"] == "bfp8"
 m.load_state_dict(ref); ppl.apply_config(m, c)
