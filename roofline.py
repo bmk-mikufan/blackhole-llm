@@ -55,6 +55,10 @@ MODELS = {
     "Mistral-7B-v0.3":   dict(d=4096, L=32, H=32, KV=8,  hd=128, I=14336, V=32768),
     "Mistral-Small-24B": dict(d=5120, L=40, H=32, KV=8,  hd=128, I=32768, V=131072),
     "Llama-3.3-70B":     dict(d=8192, L=80, H=64, KV=8,  hd=128, I=28672, V=128256),
+    # ungated stand-ins used for the CPU accuracy study (Llama/Gemma checkpoints need an HF token)
+    "SmolLM2-1.7B":      dict(d=2048, L=24, H=32, KV=32, hd=64,  I=8192,  V=49152),
+    "Qwen2.5-1.5B":      dict(d=1536, L=28, H=12, KV=2,  hd=128, I=8960,  V=151936),
+    "OLMo-2-0425-1B":    dict(d=2048, L=16, H=16, KV=16, hd=128, I=8192,  V=100352),
 }
 
 # Published reference point (tt-metal models/README.md, v0.64.0-dev20251030, ISL 128):

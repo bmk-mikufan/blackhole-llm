@@ -6,6 +6,11 @@ on:
       model:
         description: HF model id
         default: Qwen/Qwen3-0.6B
+      corpus:
+        description: eval text
+        type: choice
+        options: [wikitext2_test, c4_validation]
+        default: wikitext2_test
       matrix:
         description: 'JSON list of experiments [{"tag": ..., "args": ...}], one parallel job each'
         # formats: every roofline config | groups: all-bfp8 with one tensor group at bfp4 |
@@ -21,7 +26,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
@@ -34,15 +39,21 @@ jobs:
       - run: |
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
           pip install -q numpy matplotlib "transformers>=4.51" pyarrow huggingface_hub
-      - name: wikitext-2 test split
+      - name: eval corpus
         run: |
           mkdir -p data
           python -c "
-          from huggingface_hub import hf_hub_download; import pyarrow.parquet as pq
+          import gzip, json; from huggingface_hub import hf_hub_download; import pyarrow.parquet as pq
           p = hf_hub_download('Salesforce/wikitext', 'wikitext-2-raw-v1/test-00000-of-00001.parquet', repo_type='dataset')
-          open('data/wikitext2_test.txt', 'w').write(''.join(pq.read_table(p).column('text').to_pylist()))"
+          open('data/wikitext2_test.txt', 'w').write(''.join(pq.read_table(p).column('text').to_pylist()))
+          docs = (json.loads(l)['text'] for l in gzip.open(hf_hub_download('allenai/c4', 'en/c4-validation.00000-of-00008.json.gz', repo_type='dataset'), 'rt'))
+          out, n = [], 0
+          for d in docs:  # ~400k chars is ~100k tokens, plenty for --max-tokens
+              out.append(d); n += len(d)
+              if n > 400_000: break
+          open('data/c4_validation.txt', 'w').write('\n\n'.join(out))"
       - run: python tests/test_ppl.py
-      - run: python ppl.py --model "${{ inputs.model }}" --text data/wikitext2_test.txt --tag ${{ matrix.tag }} ${{ matrix.args }}
+      - run: python ppl.py --model "${{ inputs.model }}" --text data/${{ inputs.corpus }}.txt --tag ${{ matrix.tag }} ${{ matrix.args }}
       - uses: actions/upload-artifact@v4
         with:
           name: ppl-${{ matrix.tag }}
@@ -63,4 +74,4 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add results/
           git diff --cached --quiet || git commit -m "results: ppl for ${{ inputs.model }} (run ${{ github.run_id }})"
-          git push
+          for i in 1 2 3 4 5; do git pull --rebase -q && git push && break; sleep $((i * 10)); done   # parallel runs race on main

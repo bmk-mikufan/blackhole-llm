@@ -11,10 +11,11 @@ ppl.untie_lm_head(m)
 assert m.lm_head.weight is not m.model.embed_tokens.weight
 ids = list(torch.randint(0, 256, (600,)).tolist())
 ref = {k: v.clone() for k, v in m.state_dict().items()}
-base = ppl.perplexity(m, ids, 128)
+base, ref_top1 = ppl.evaluate(m, ids, 128)
+assert len(ref_top1) == len(ids) - 1
 out = {}
 for name in CONFIGS:
-    m.load_state_dict(ref); n = ppl.apply_config(m, CONFIGS[name]); out[name] = ppl.perplexity(m, ids, 128)
+    m.load_state_dict(ref); n = ppl.apply_config(m, CONFIGS[name]); out[name] = ppl.evaluate(m, ids, 128)[0]
     assert n == 2*7 + 1, n
 emb_ok = torch.equal(m.model.embed_tokens.weight, ref["model.embed_tokens.weight"])
 print(base, out, "embedding untouched:", emb_ok)

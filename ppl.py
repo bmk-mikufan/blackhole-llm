@@ -54,8 +54,9 @@ def apply_config(model, cfg):
 
 
 @torch.no_grad()
-def perplexity(model, ids, ctx):
-    nll, count = 0.0, 0
+def evaluate(model, ids, ctx):
+    """Perplexity and the model's top-1 next-token predictions (for agreement with the reference)."""
+    nll, count, top1 = 0.0, 0, []
     for i in range(0, len(ids) - 1, ctx):
         chunk = ids[i:i + ctx + 1]
         if len(chunk) < 2:
@@ -64,7 +65,8 @@ def perplexity(model, ids, ctx):
         logits = model(x).logits.float()
         nll += torch.nn.functional.cross_entropy(logits[0], y[0], reduction="sum").item()
         count += y.numel()
-    return float(torch.exp(torch.tensor(nll / count)))
+        top1.append(logits[0].argmax(-1))
+    return float(torch.exp(torch.tensor(nll / count))), torch.cat(top1)
 
 
 def main():
@@ -95,21 +97,24 @@ def main():
     specs = a.configs.split(",")
     if a.layer_sweep:
         groups, fmt = a.layer_sweep.split("=")
-        n_layers = load().config.num_hidden_layers
+        from transformers import AutoConfig
+        n_layers = AutoConfig.from_pretrained(a.model).num_hidden_layers
         specs = [a.sweep_base] + [a.sweep_base + "".join(f"+L{i}.{g}={fmt}" for g in groups.split(","))
                                   for i in range(n_layers)]
 
     rows = [f"Model `{a.model}` ({a.dtype} compute), {len(ids):,} tokens of `{Path(a.text).name}`, ctx {a.ctx}. "
             "Weights only (KV cache / activations not quantized).\n",
-            "| Config | PPL | Δ vs unquantized |", "|---|---:|---:|"]
-    base = perplexity(load(), ids, a.ctx)
-    rows.append(f"| unquantized ({a.dtype}) | {base:.3f} | — |")
+            "Top-1 agree = share of positions where the quantized model's argmax token matches the unquantized one.\n",
+            "| Config | PPL | Δ vs unquantized | Top-1 agree |", "|---|---:|---:|---:|"]
+    base, ref_top1 = evaluate(load(), ids, a.ctx)
+    rows.append(f"| unquantized ({a.dtype}) | {base:.3f} | — | — |")
     print(rows[-1], flush=True)
     for spec in specs:
         model = load()
         apply_config(model, parse_spec(spec))
-        p = perplexity(model, ids, a.ctx)
-        rows.append(f"| `{spec}` | {p:.3f} | {100 * (p / base - 1):+.2f}% |")
+        p, top1 = evaluate(model, ids, a.ctx)
+        agree = (top1 == ref_top1).float().mean().item()
+        rows.append(f"| `{spec}` | {p:.3f} | {100 * (p / base - 1):+.2f}% | {100 * agree:.2f}% |")
         print(rows[-1], flush=True)
         del model
     out = Path(__file__).parent / "results" / f"ppl_{a.model.split('/')[-1]}_{a.tag}.md"
