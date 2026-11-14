@@ -50,7 +50,7 @@ need 104% of peak, which is impossible, so the demo really is running compressed
 | Llama 3.3 70B | ~~141~~ | ~~75.9~~ | ~~57.2~~ | ~~47.8~~ | — |
 
 32B-class models fit **only** with BFP4 MLPs, and then leave room for just ~8 concurrent 4k-token users.
-Full table for 16 models: [`results/fit.md`](results/fit.md). Decode ceilings: [`results/decode_ceiling.md`](results/decode_ceiling.md).
+Full table for 19 models: [`results/fit.md`](results/fit.md). Decode ceilings: [`results/decode_ceiling.md`](results/decode_ceiling.md).
 
 ![model fit](figures/model_fit.png)
 
@@ -121,17 +121,48 @@ Same pipeline, same budget (fp32 reference PPL 20.76).
   damaging groups to put in BFP4 while WO stays nearly free. Format choice should be made per tensor group.
 - **Not consistent:** on 1.7B no single layer's MLP costs more than 1% at BFP4, and the last layer, the most sensitive one
   on 0.6B, shows the opposite sign. A protected-layer set therefore has to be searched per model and cannot be copied across sizes.
-- **Anomaly to check:** BFP4 FF2 *lowers* wikitext-2 perplexity on 1.7B (also visible as `mlp-bfp4` beating `tt-perf`).
-  Quantization noise can act as a regularizer on one corpus. We will re-test with a second corpus and logit KL divergence
-  before reading anything into it.
+- **Anomaly, resolved:** BFP4 FF2 *lowered* wikitext-2 perplexity on 1.7B (−1.2%). Re-run on a second corpus (C4 validation,
+  32k tokens) gives **+1.05%** for the same config, with top-1 agreement dropping to 91%. The improvement was a quirk of one corpus.
+  FF2 is cheap to compress on this model, but compressing it does not help.
 
 ![sensitivity 1.7B](figures/ppl_sensitivity_Qwen3-1.7B.png)
+
+**7. Six models, two corpora: what generalizes.**
+We added three ungated models from other families: SmolLM2-1.7B (Llama architecture, standing in for gated Llama 3.2),
+Qwen2.5-1.5B and OLMo-2-1B. We also added Qwen3-4B (bf16 compute, 16k tokens, groups/formats only) and a **top-1 agreement**
+metric: the share of positions where the quantized model's argmax token matches the unquantized model's.
+
+| Model | `tt-perf` Δ PPL | all-BFP4 Δ PPL | One group → BFP4 (WQKV / WO / FF1·FF3 / FF2 / LM head), Δ PPL % | Most sensitive layers (MLP → BFP4) |
+|---|---:|---:|---|---|
+| Qwen3-0.6B | +10.7% | +30.9% | 4.9 / **1.9** / **10.7** / 5.0 / 6.5 | L27 (last), L22 |
+| Qwen3-1.7B | +6.9% | +12.7% | 1.7 / **0.2** / **6.9** / −1.2 / 5.5 | none above 1% |
+| Qwen3-1.7B, C4 | +4.8% | +13.8% | 2.2 / 1.1 / **4.8** / **1.0** / **4.8** | — |
+| Qwen3-4B (bf16) | +5.0% | +7.0% | 1.5 / **−1.2** / **5.1** / 0.9 / 1.6 | — |
+| Qwen2.5-1.5B | +5.0% | +22.7% | 3.0 / **1.3** / 5.0 / 5.2 / **7.4** | L26, L27 (last two), L2 |
+| SmolLM2-1.7B | +7.0% | +57.3% | 6.5 / **1.2** / 7.0 / 9.2 / **21.1** | **L1 (+8.2%)**, L23 (last) |
+| OLMo-2-1B | +5.2% | +33.2% | 2.1 / **1.5** / 5.2 / 3.4 / **16.3** | L15 (last) |
+
+- **Holds everywhere:** WO is the cheapest group to put in BFP4 in all 7 model/corpus runs, and the worst group is always FF1/FF3
+  or the LM head. Top-1 agreement falls in the same order as perplexity rises, including in the cases where PPL alone looked odd.
+- **Per byte, the LM head is the most expensive group** in every model except Qwen3-0.6B (where FF1/FF3 is). FF1/FF3 is the
+  largest group, so per byte it is among the *cheapest* on SmolLM2, Qwen2.5 and OLMo-2. The stock `tt-perf` choice (BFP4 FF1/FF3)
+  is therefore a reasonable default, and our finding 5 (that it is off the Pareto front) is specific to Qwen3-0.6B.
+  **Keep the LM head in BFP8.**
+- **Layer sensitivity is concentrated but model-specific:** in each model at most 4 of 16 to 28 layers cost more than 1%. The last
+  one or two layers are among them in 4 of 5 models, but SmolLM2's worst layer is **layer 1 (+8.2%)**. A cheap per-model layer
+  sweep (one CPU job) is enough to find the layers worth protecting before running on hardware.
+- **Bigger is more robust:** all-BFP4 costs +31% → +13% → +7% going from Qwen3-0.6B → 1.7B → 4B.
+
+![groups across models](figures/ppl_groups_cross_model.png)
+
+Per-model figures: [`figures/ppl_sensitivity_*.png`](figures/), [`figures/ppl_pareto_*.png`](figures/). Qwen3-4B baselines differ by
+0.05% between its two bf16 jobs, which sets the noise floor for that row.
 
 ## Repository
 
 | Path | What |
 |---|---|
-| [`roofline.py`](roofline.py) | Model zoo (16 configs), memory footprint, KV budget, bandwidth-bound decode ceiling, L1 residency, calibration vs published numbers |
+| [`roofline.py`](roofline.py) | Model zoo (19 configs), memory footprint, KV budget, bandwidth-bound decode ceiling, L1 residency, calibration vs published numbers |
 | [`bfp.py`](bfp.py) | CPU emulator for TT `bfp8_b` / `bfp4_b` (shared-exponent block float) + synthetic error study |
 | [`ppl.py`](ppl.py) | Perplexity of any HF causal LM with weights fake-quantized per tensor group (`wqkv`, `wo`, `ff1_3`, `ff2`, `lm_head`) |
 | [`plot_ppl.py`](plot_ppl.py) | Sensitivity and Pareto figures from the `ppl.py` result tables |
@@ -156,7 +187,8 @@ gh workflow run ppl.yml -f model=Qwen/Qwen3-1.7B   # run the default experiment 
 - [x] **Phase 0 · Pre-hardware analysis**: footprint/KV model, bandwidth ceiling calibrated to published p150 data, L1 residency analysis, BFP emulator
 - [x] **Phase 0b · Accuracy emulation (Qwen3-0.6B)**: format mixes, tensor-group and per-layer BFP4 sensitivity, protected-layer mixes
 - [x] **Phase 0c · Replication on Qwen3-1.7B**: group ranking holds, layer ranking is model-specific
-- [ ] **Phase 0d**: second corpus + logit KL divergence; Llama 3.2 1B/3B, Gemma 3 1B; test whether per-layer sensitivities add up
+- [x] **Phase 0d · Cross-model study**: SmolLM2-1.7B, Qwen2.5-1.5B, OLMo-2-1B, Qwen3-4B; C4 as second corpus; top-1 agreement metric
+- [ ] **Phase 0e**: test whether per-layer sensitivities add up (greedy protected-layer search); KV-cache format emulation; gated Llama 3.2 / Gemma 3 with an HF token
 - [ ] **Phase 1 · Bring-up**: TT-Metalium/TT-NN + vLLM plugin; reproduce 33.1 t/s/u; validate the fit table on real allocator limits
 - [ ] **Phase 2 · Optimization**
   - [ ] Per-layer format search (BFP4 MLP / BFP8 attention / sensitive-layer exceptions), using `ppl.py` for ranking
@@ -182,6 +214,7 @@ gh workflow run ppl.yml -f model=Qwen/Qwen3-1.7B   # run the default experiment 
 (3) 8B 이상 모델은 레이어 하나도 L1(180MB)에 다 들어가지 않으므로, L1은 가중치 상주보다 프리페치 용도로 써야 합니다.
 (4) BFP 블록 포맷의 오차는 이상치 채널의 방향에 따라 달라집니다.
 (5) Qwen3-0.6B 실험에서 Tenstorrent 기본 설정(tt-perf)은 정확도 대비 절약 바이트 측면에서 최적이 아니었습니다. 민감한 레이어 3개(0, 22, 27)만 BFP8로 두면 기본 설정보다 바이트는 더 줄이면서(118MB 대 88MB) 정확도 손실은 더 작았습니다(+10.3% 대 +10.7%).
+(6) 모델 6개(Qwen3 0.6B/1.7B/4B, Qwen2.5, SmolLM2, OLMo-2)와 데이터셋 2개에서 공통으로, 어텐션 출력(WO)은 BFP4로 낮춰도 손실이 가장 작았고 FF1/FF3 또는 LM head가 가장 민감했습니다. 바이트당 손실로는 LM head가 거의 모든 모델에서 가장 비싸므로 BFP8로 유지해야 합니다. 민감한 레이어는 모델마다 2~4개에 몰려 있지만 위치가 달라서, 모델별로 레이어를 훑어보는 작업이 필요합니다.
 
 ## License
 

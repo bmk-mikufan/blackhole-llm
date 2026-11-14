@@ -99,5 +99,27 @@ def pareto(name):
         print(f"{b8 - mb:7.1f} MB saved  {d:+6.2f}%  {k}")
 
 
+def cross():
+    """One group at BFP4 (rest BFP8), Δ PPL vs unquantized, for every model/corpus with a groups table."""
+    groups = ["wqkv", "wo", "ff1_3", "ff2", "lm_head"]
+    files = sorted((ROOT / "results").glob("ppl_*_groups*.md"))
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    w = 0.8 / len(files)
+    for i, f in enumerate(files):
+        r = rows(f)
+        label = f.stem[4:].replace("_groups", "").replace("-c4", " (C4)")
+        ax.bar([x + (i - len(files) / 2 + 0.5) * w for x in range(len(groups))],
+               [100 * (r[f"all-bfp8+{g}=bfp4"] / r[None] - 1) for g in groups], w, label=label)
+    ax.set_xticks(range(len(groups)), groups)
+    ax.axhline(0, color="k", lw=0.8)
+    ax.set_ylabel("Δ PPL vs unquantized (%)")
+    ax.set_title("One tensor group -> BFP4 (rest BFP8), across models: WO is always cheapest, FF1/FF3 or LM head always worst")
+    ax.legend(fontsize=8, ncol=2)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(ROOT / "figures" / "ppl_groups_cross_model.png", dpi=150)
+
+
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "Qwen3-0.6B")
+    arg = sys.argv[1] if len(sys.argv) > 1 else "Qwen3-0.6B"
+    cross() if arg == "all" else main(arg)
